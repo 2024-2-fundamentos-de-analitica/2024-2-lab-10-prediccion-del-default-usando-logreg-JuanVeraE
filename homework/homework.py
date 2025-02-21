@@ -95,3 +95,136 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import os
+import gzip
+import json
+import numpy as np
+import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import precision_score, balanced_accuracy_score, recall_score, f1_score, confusion_matrix
+
+# Paso 1
+# Descompriomir los archivos train y test
+train = "files/input/train_default_of_credit_card_clients.csv"
+test = "files/input/test_default_of_credit_card_clients.csv"
+
+# Leer los archivos
+train = pd.read_csv(train)
+test = pd.read_csv(test)
+
+# Renombrar la columna "default payment next month" a "default"
+train.rename(columns={"default payment next month": "default"}, inplace=True)
+test.rename(columns={"default payment next month": "default"}, inplace=True)
+
+# Remover la columna "ID"
+train.drop(columns=["ID"], inplace=True)
+test.drop(columns=["ID"], inplace=True)
+
+# Eliminar los registros con informacion no disponible
+train.dropna(inplace=True)
+test.dropna(inplace=True)
+
+# Para la columna EDUCATION, valores > 4 indican niveles superiores
+
+train["EDUCATION"] = train["EDUCATION"].apply(lambda x: x if x <= 4 else 4)
+test["EDUCATION"] = test["EDUCATION"].apply(lambda x: x if x <= 4 else 4)
+
+# Paso 2
+x_train = train.drop(columns=["default"])
+y_train = train["default"]
+x_test = test.drop(columns=["default"])
+y_test = test["default"]
+
+# Paso 3
+# Crear el pipeline
+# Definir las columnas categóricas y numéricas
+categorical_features = train.select_dtypes(include=['object']).columns.tolist()
+numerical_features = train.select_dtypes(include=['float64', 'int64']).columns.tolist()
+
+# Transformadores
+categorical_transformer = OneHotEncoder(handle_unknown='ignore')
+numerical_transformer = MinMaxScaler()
+
+# Preprocesador de columnas
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('cat', categorical_transformer, categorical_features),
+        ('num', numerical_transformer, numerical_features)
+    ]
+)
+
+# Pipeline completo
+pipeline = Pipeline([
+    ('preprocessing', preprocessor),
+    ('feature_selection', SelectKBest(score_func=f_classif, k=3)),  # Selección de características
+    ('classifier', LogisticRegression())
+])
+
+# Paso 4
+# Optimizar hiperparametros
+param_grid = {
+    'feature_selection__k': [3, 5, 7],
+    'classifier__C': [0.1, 1, 10]
+}
+
+grid_search = GridSearchCV(pipeline, param_grid, cv=10, scoring='balanced_accuracy')
+grid_search.fit(x_train, y_train)
+
+# Paso 5
+# Guardar el modelo
+with gzip.open("files/models/model.pkl.gz", "wb") as f:
+    f.write(gzip.compress(pickle.dumps(grid_search.best_estimator_)))
+
+# Paso 6 y 7
+# crear una función para calcular las métricas y la matriz de confusión
+
+def calculate_metrics(y_true, y_pred):
+    precision = precision_score(y_true, y_pred)
+    balanced_accuracy = balanced_accuracy_score(y_true, y_pred)
+    recall = recall_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred)
+    return precision, balanced_accuracy, recall, f1
+
+def calculate_confusion_matrix(y_true, y_pred):
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    return {"predicted_0": tn, "predicted_1": fp}, {"predicted_0": fn, "predicted_1": tp}
+
+# Calcular las métricas y la matriz de confusión
+metrics = {}
+
+# Conjunto de entrenamiento
+y_pred_train = grid_search.predict(x_train)
+precision, balanced_accuracy, recall, f1 = calculate_metrics(y_train, y_pred_train)
+cm_matrix = calculate_confusion_matrix(y_train, y_pred_train)
+metrics["train"] = {
+    "precision": precision,
+    "balanced_accuracy": balanced_accuracy,
+    "recall": recall,
+    "f1_score": f1,
+    "cm_matrix": cm_matrix
+}
+
+# Conjunto de prueba
+y_pred_test = grid_search.predict(x_test)
+precision, balanced_accuracy, recall, f1 = calculate_metrics(y_test, y_pred_test)
+cm_matrix = calculate_confusion_matrix(y_test, y_pred_test)
+metrics["test"] = {
+    "precision": precision,
+    "balanced_accuracy": balanced_accuracy,
+    "recall": recall,
+    "f1_score": f1,
+    "cm_matrix": cm_matrix
+}
+
+# Guardar las métricas junto a la matriz de confusión en un archivo JSON
+with open("files/output/metrics.json", "w") as f:
+    for key, value in metrics.items():
+        f.write(json.dumps({"type": "metrics", "dataset": key, **value}) + "\n")
+
+# Fin del script
